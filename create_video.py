@@ -1,25 +1,26 @@
 import torch
 import dnnlib
 import os
-import cv2
 import matplotlib.pyplot as plt
 from PIL import Image
 from configs import paths_config
-from latent_creators import e4e_latent_creator, sg2_latent_creator, sg2_plus_latent_creator
-from models.stylegan2.model import Generator  # 필요한 경우 수정
-# import legacy
+from latent_creators import sg2_latent_creator
+from models.e4e.stylegan2.model import Generator
+import legacy
 
 # GPU 사용 가능 여부 확인
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(device)
 
-def load_latents(image_name, w_path_dir):
-    inversions = {}
-    sg2_embedding_dir = f'{w_path_dir}/{paths_config.sg2_results_keyword}/{image_name}'
-    inversions[paths_config.sg2_results_keyword] = torch.load(f'{sg2_embedding_dir}/0.pt')
-    e4e_embedding_dir = f'{w_path_dir}/{paths_config.e4e_results_keyword}/{image_name}'
-    inversions[paths_config.e4e_results_keyword] = torch.load(f'{e4e_embedding_dir}/0.pt')
-    sg2_plus_embedding_dir = f'{w_path_dir}/{paths_config.sg2_plus_results_keyword}/{image_name}'
-    inversions[paths_config.sg2_plus_results_keyword] = torch.load(f'{sg2_plus_embedding_dir}/0.pt')
+def create_latents(image_path):
+    # SG2 Latent 생성
+    sg2_latent_creator_instance = sg2_latent_creator.SG2LatentCreator(projection_steps=600)
+    sg2_latent_creator_instance.create_latents()
+
+def load_latents(image_name, w_path_dir, latent_type):
+    print("############################## start to load latents ##############################")
+    embedding_dir = f'{w_path_dir}/{latent_type}/{image_name}'
+    inversions = torch.load(f'{embedding_dir}/0.pt')
     return inversions
 
 def mix_latents(target_latent, source_latent, target_ratio=0.3, source_ratio=0.7):
@@ -39,31 +40,14 @@ def plot_image_from_w(w, G):
     plt.imshow(resized_image)
     plt.show()
 
-def extract_frames(video_path, frame_dir):
-    cap = cv2.VideoCapture(video_path)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_list = []
-    for i in range(frame_count):
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame_path = os.path.join(frame_dir, f"frame_{i:04d}.jpg")
-        cv2.imwrite(frame_path, frame)
-        frame_list.append(frame_path)
-    cap.release()
-    return frame_list
+def main(frame_dir, source_img_path, output_dir, w_path_dir, generator_path, latent_type):
+    create_latents(source_img_path)
+    
+    # 1. Load latents for source image
+    source_image_name = os.path.basename(source_img_path).split('.')[0]
+    source_latents = load_latents(source_image_name, w_path_dir, latent_type)
 
-def main(video_path, source_img_path, output_dir, w_path_dir, generator_path):
-    # 1. Extract frames from video
-    frame_dir = os.path.join(output_dir, "frames")
-    os.makedirs(frame_dir, exist_ok=True)
-    frame_list = extract_frames(video_path, frame_dir)
-
-    # 2. Load latents for source image
-    source_image_name = source_img_path.split('/')[-1].split('.')[0]
-    source_latents = load_latents(source_image_name, w_path_dir)
-
-    # 3. Load generator
+    # 2. Load generator
     print(f"Loading generator from path: {generator_path}")
     if not os.path.isfile(generator_path):
         print(f"File not found: {generator_path}")
@@ -77,29 +61,30 @@ def main(video_path, source_img_path, output_dir, w_path_dir, generator_path):
         print(f"Error loading the generator: {e}")
         return
 
-    # 4. Process each frame
-    for frame_path in frame_list:
-        # Load latents for current frame
-        frame_name = os.path.basename(frame_path).split('.')[0]
-        target_latents = load_latents(frame_name, w_path_dir)
+    # 3. Process each frame
+    for frame_file in sorted(os.listdir(frame_dir)):
+        if frame_file.endswith(".png"):
+            # Load latents for current frame
+            frame_name = os.path.splitext(frame_file)[0]
+            target_latents = load_latents(frame_name, w_path_dir, latent_type)
 
-        # Mix latents with defined ratios
-        mixed_latent = mix_latents(target_latents[paths_config.sg2_results_keyword], 
-                                   source_latents[paths_config.sg2_results_keyword])
+            # Mix latents with defined ratios
+            mixed_latent = mix_latents(target_latents, source_latents, target_ratio=0.3, source_ratio=0.7)
 
-        # Generate and save mixed image
-        mixed_image = get_image_from_w(mixed_latent, generator)
-        mixed_image_pil = Image.fromarray(mixed_image)
-        output_img_path = os.path.join(output_dir, f"output_{frame_name}.jpg")
-        mixed_image_pil.save(output_img_path)
+            # Generate and save mixed image
+            mixed_image = get_image_from_w(mixed_latent, generator)
+            mixed_image_pil = Image.fromarray(mixed_image)
+            output_img_path = os.path.join(output_dir, f"output_{frame_name}.jpg")
+            mixed_image_pil.save(output_img_path)
 
-        # Plot mixed image (optional)
-        plot_image_from_w(mixed_latent, generator)
+            # Plot mixed image (optional)
+            plot_image_from_w(mixed_latent, generator)
 
 if __name__ == "__main__":
-    video_path = paths_config.input_data_path + "/target_video.mp4"
+    frame_dir = os.path.join(paths_config.input_data_path, "frames")
     source_img_path = paths_config.input_data_path + "/source.jpg"
     output_dir = paths_config.output_data_path  # 수정 필요
     w_path_dir = paths_config.embedding_base_dir  # 수정 필요
     generator_path = paths_config.stylegan2_ada_ffhq  # generator 경로 설정 (stylegan2 설정)
-    main(video_path, source_img_path, output_dir, w_path_dir, generator_path)
+    latent_type = paths_config.sg2_results_keyword  # 사용할 latent type 선택 (sg2, e4e, sg2_plus 중 하나)
+    main(frame_dir, source_img_path, output_dir, w_path_dir, generator_path, latent_type)
